@@ -166,68 +166,64 @@
             return undefined;
         }
     }
-    function forceHighestQuality(bytes, url) {
-    const fields = wireFields(bytes);
-    const quality = selectQuality(fields, url);
+        function forceHighestQuality(bytes, url) {
+        const fields = wireFields(bytes);
+        let quality = selectQuality(fields, url);
 
-    // 8K 安全保护：
-    // 如果当前视频的目标质量是 4320p，
-    // 不修改 SABR 原始请求，让 YouTube 自己协商 8K 播放参数。
-    if (quality?.height >= 4320) {
-        return bytes;
-    }
+        // 如果没有匹配到质量目录，不再强制修改，原样透传
+        if (!quality) {
+            return bytes;
+        }
 
-    // 没有匹配到质量目录时，不再强制写入 4320p。
-    // 这是原代码最容易导致高分辨率播放异常的兜底逻辑。
-    if (!quality) {
-        return bytes;
-    }
+        // 当检测到 8K (4320p) 或更高画质请求时，强行降级限制为 4K (2160p)
+        if (quality.height >= 4320) {
+            quality.height = 2160;
+        }
 
-    const chunks = [];
-    let found = false;
+        const chunks = [];
+        let found = false;
 
-    for (const field of fields) {
-        if (field.no === 1 && field.wire === 2) {
-            const state = setQuality(field.data, quality);
+        for (const field of fields) {
+            if (field.no === 1 && field.wire === 2) {
+                const state = setQuality(field.data, quality);
+
+                chunks.push(
+                    varint(10),
+                    varint(state.length),
+                    state,
+                );
+
+                found = true;
+            } else if (field.no === 17 && field.wire === 2) {
+                // 删除原有 formats，由当前质量目录重新注入允许的 itag。
+                continue;
+            } else {
+                chunks.push(field.raw);
+            }
+        }
+
+        // 没有原有质量状态时才创建新的状态。
+        if (!found) {
+            const state = setQuality(new Uint8Array(), quality);
 
             chunks.push(
                 varint(10),
                 varint(state.length),
                 state,
             );
-
-            found = true;
-        } else if (field.no === 17 && field.wire === 2) {
-            // 删除原有 formats，由当前质量目录重新注入允许的 itag。
-            continue;
-        } else {
-            chunks.push(field.raw);
         }
+
+        // 仅注入当前质量目录中真实存在的 formats。
+        for (const format of quality.formats) {
+            chunks.push(
+                varint(17 * 8 + 2),
+                varint(format.length),
+                format,
+            );
+        }
+
+        return concatBytes(chunks);
     }
-
-    // 没有原有质量状态时才创建新的状态。
-    if (!found) {
-        const state = setQuality(new Uint8Array(), quality);
-
-        chunks.push(
-            varint(10),
-            varint(state.length),
-            state,
-        );
-    }
-
-    // 仅注入当前质量目录中真实存在的 formats。
-    for (const format of quality.formats) {
-        chunks.push(
-            varint(17 * 8 + 2),
-            varint(format.length),
-            format,
-        );
-    }
-
-    return concatBytes(chunks);
-    }
-
     // 3. Configuration and persistent key state.
     function readOptions(defaults = {}) {
         return typeof $argument === "string" && !$argument.includes("{{{")
