@@ -93,25 +93,19 @@
     }
 
     // 2. Auto HD: edit only SABR quality preferences; preserve every other field.
-    function setQuality(bytes, quality) {
+    function setQuality(bytes, targetHeight = 2160) {
         // A fresh manual selection plus sticky resolution prevents ABR downgrades.
-        const targetHeight = (quality && quality.height >= 4320) ? 2160 : quality?.height;
-        const values = new Map(
-                quality
-                    ? [
-                          [13, 0],
-                          [14, 2],
-                          [16, targetHeight],
-                          [21, targetHeight],
-                          [26, 3],
-                          [30, 0],
-                      ]
-                    : [
-                          [16, 2160],
-                          [26, 1],
-                      ],
-            ),
-            seen = new Set(),
+        // 确保传递给协议的高度参数最大不超过 2160 (4K)
+        const safeHeight = Math.min(targetHeight, 2160);
+        const values = new Map([
+            [13, 0],
+            [14, 2],
+            [16, safeHeight],
+            [21, safeHeight],
+            [26, 3],
+            [30, 0],
+        ]);
+        const seen = new Set(),
             chunks = [];
         for (const field of wireFields(bytes)) {
             if (field.wire === 0 && values.has(field.no)) {
@@ -123,110 +117,59 @@
             if (!seen.has(no)) chunks.push(varint(no * 8), varint(value));
         return concatBytes(chunks);
     }
+
     function selectQuality(fields, url) {
         try {
             const match = /[?&]id=([^&]+)/.exec(url);
             if (!match) return;
-            const quality =
-                readConfig(QUALITY_KEY)?.[decodeURIComponent(match[1])];
-            if (
-                !Number.isInteger(quality?.height) ||
-                quality.height <= 0 ||
-                quality.height > 0x7fffffff ||
-                !Array.isArray(quality.itags)
-            )
-                return;
-            const config = fields.find(
-                (field) => field.no === 5 && field.wire === 2,
-            );
-            const signed = config && bytesField(config.data, 1);
-            if (!signed) return;
+            const quality = readConfig(QUALITY_KEY)?.[decodeURIComponent(match[1])];
+            let height = quality?.height;
+            
+            // 如果读取不到配置，默认将高度限定为 2160
+            if (!Number.isInteger(height) || height <= 0 || height > 0x7fffffff) {
+                height = 2160;
+            } else if (height >= 4320) {
+                height = 2160; // 强制降级 8K -> 4K
+            }
 
-            // Copy complete IDs from this request's allowed list; never invent an
-            // itag, timestamp, tag or authorization, nor modify the signed config.
-            const formats = wireFields(signed)
-                .filter((field) => {
-                    if (field.no !== 6 || field.wire !== 2) return false;
-                    const itag = wireFields(field.data).find(
-                        (field) => field.no === 1 && field.wire === 0,
-                    );
-                    if (!itag) return false;
-                    let value = 0,
-                        scale = 1;
-                    for (const byte of itag.data) {
-                        value += (byte & 127) * scale;
-                        scale *= 128;
-                    }
-                    return quality.itags.includes(value);
-                })
-                .map((field) => field.data);
-
-            const finalHeight = quality.height >= 4320 ? 2160 : quality.height;
-
-            return formats.length
-                ? { height: finalHeight, formats }
-                : undefined;
+            return { height };
         } catch {
-            return undefined;
+            return { height: 2160 };
         }
     }
+
     function forceHighestQuality(bytes, url) {
         const fields = wireFields(bytes);
         const quality = selectQuality(fields, url);
-
-        // 如果没有提取到明确画质控制参数，尝试直接用 2160p 兜底修改控制字段，防止回落 720p
-        if (!quality) {
-            const chunks = [];
-            for (const field of fields) {
-                if (field.no === 1 && field.wire === 2) {
-                    const state = setQuality(field.data, { height: 2160 });
-                    chunks.push(varint(10), varint(state.length), state);
-                } else {
-                    chunks.push(field.raw);
-                }
-            }
-            return concatBytes(chunks);
-        }
+        const targetHeight = quality ? quality.height : 2160;
 
         const chunks = [];
         let found = false;
 
         for (const field of fields) {
             if (field.no === 1 && field.wire === 2) {
-                const state = setQuality(field.data, quality);
-
+                // 修改控制状态中的分辨率上线为 2160p
+                const state = setQuality(field.data, targetHeight);
                 chunks.push(
                     varint(10),
                     varint(state.length),
                     state,
                 );
-
                 found = true;
-            } else if (field.no === 17 && field.wire === 2) {
-                // 删除原有 formats，由当前质量目录重新注入允许的 itag。
-                continue;
             } else {
+                // 保留其他所有原生的 protobuf 字段（包括完整的原始 formats）
+                // 这样既能限定最高画质为 2160p，又绝不会破坏签名或导致解码报错
                 chunks.push(field.raw);
             }
         }
 
-        // 没有原有质量状态时才创建新的状态。
+        // 如果原始请求中没有包含状态字段，补全写入 2160p 控制状态
         if (!found) {
-            const state = setQuality(new Uint8Array(), quality);
-
+            const state = setQuality(new Uint8Array(), targetHeight);
             chunks.push(
                 varint(10),
                 varint(state.length),
                 state,
-            );
-        }
-
-        // 仅注入当前质量目录中真实存在的 formats。
-        for (const format of quality.formats) {
-            chunks.push(
-                varint(17 * 8 + 2),
-                varint(format.length),
-                format,
             );
         }
 
