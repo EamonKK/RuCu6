@@ -95,14 +95,14 @@
     // 2. Auto HD: edit only SABR quality preferences; preserve every other field.
     function setQuality(bytes, quality) {
         // A fresh manual selection plus sticky resolution prevents ABR downgrades.
-        // Without a matching catalogue, retain the higher-quality preference (2160p).
+        const targetHeight = (quality && quality.height >= 4320) ? 2160 : quality?.height;
         const values = new Map(
                 quality
                     ? [
                           [13, 0],
                           [14, 2],
-                          [16, quality.height],
-                          [21, quality.height],
+                          [16, targetHeight],
+                          [21, targetHeight],
                           [26, 3],
                           [30, 0],
                       ]
@@ -142,15 +142,6 @@
             const signed = config && bytesField(config.data, 1);
             if (!signed) return;
 
-            // 常见的 8K 专用 itags (AV1 / VP9 8K 格式)
-            const ITAGS_8K = new Set([571, 702, 272, 337]);
-
-            // 如果当前目标画质为 8K (4320p)，剔除 8K 专用码流并强行将目标画质调整为 2160p
-            const is8KTarget = quality.height >= 4320;
-            const targetItags = is8KTarget
-                ? quality.itags.filter((itag) => !ITAGS_8K.has(itag))
-                : quality.itags;
-
             // Copy complete IDs from this request's allowed list; never invent an
             // itag, timestamp, tag or authorization, nor modify the signed config.
             const formats = wireFields(signed)
@@ -166,12 +157,14 @@
                         value += (byte & 127) * scale;
                         scale *= 128;
                     }
-                    return targetItags.includes(value);
+                    return quality.itags.includes(value);
                 })
                 .map((field) => field.data);
 
+            const finalHeight = quality.height >= 4320 ? 2160 : quality.height;
+
             return formats.length
-                ? { height: is8KTarget ? 2160 : quality.height, formats }
+                ? { height: finalHeight, formats }
                 : undefined;
         } catch {
             return undefined;
@@ -181,9 +174,18 @@
         const fields = wireFields(bytes);
         const quality = selectQuality(fields, url);
 
-        // 没有匹配到质量目录，或者 8K 降级提取格式失败时，不再修改，直接原样透传。
+        // 如果没有提取到明确画质控制参数，尝试直接用 2160p 兜底修改控制字段，防止回落 720p
         if (!quality) {
-            return bytes;
+            const chunks = [];
+            for (const field of fields) {
+                if (field.no === 1 && field.wire === 2) {
+                    const state = setQuality(field.data, { height: 2160 });
+                    chunks.push(varint(10), varint(state.length), state);
+                } else {
+                    chunks.push(field.raw);
+                }
+            }
+            return concatBytes(chunks);
         }
 
         const chunks = [];
