@@ -95,7 +95,7 @@
     // 2. Auto HD: edit only SABR quality preferences; preserve every other field.
     function setQuality(bytes, quality) {
         // A fresh manual selection plus sticky resolution prevents ABR downgrades.
-        // Without a matching catalogue, retain the higher-quality preference.
+        // Without a matching catalogue, retain the higher-quality preference (2160p).
         const values = new Map(
                 quality
                     ? [
@@ -107,7 +107,7 @@
                           [30, 0],
                       ]
                     : [
-                          [16, 4320],
+                          [16, 2160],
                           [26, 1],
                       ],
             ),
@@ -141,6 +141,16 @@
             );
             const signed = config && bytesField(config.data, 1);
             if (!signed) return;
+
+            // 常见的 8K 专用 itags (AV1 / VP9 8K 格式)
+            const ITAGS_8K = new Set([571, 702, 272, 337]);
+
+            // 如果当前目标画质为 8K (4320p)，剔除 8K 专用码流并强行将目标画质调整为 2160p
+            const is8KTarget = quality.height >= 4320;
+            const targetItags = is8KTarget
+                ? quality.itags.filter((itag) => !ITAGS_8K.has(itag))
+                : quality.itags;
+
             // Copy complete IDs from this request's allowed list; never invent an
             // itag, timestamp, tag or authorization, nor modify the signed config.
             const formats = wireFields(signed)
@@ -156,28 +166,24 @@
                         value += (byte & 127) * scale;
                         scale *= 128;
                     }
-                    return quality.itags.includes(value);
+                    return targetItags.includes(value);
                 })
                 .map((field) => field.data);
+
             return formats.length
-                ? { height: quality.height, formats }
+                ? { height: is8KTarget ? 2160 : quality.height, formats }
                 : undefined;
         } catch {
             return undefined;
         }
     }
-        function forceHighestQuality(bytes, url) {
+    function forceHighestQuality(bytes, url) {
         const fields = wireFields(bytes);
-        let quality = selectQuality(fields, url);
+        const quality = selectQuality(fields, url);
 
-        // 如果没有匹配到质量目录，不再强制修改，原样透传
+        // 没有匹配到质量目录，或者 8K 降级提取格式失败时，不再修改，直接原样透传。
         if (!quality) {
             return bytes;
-        }
-
-        // 当检测到 8K (4320p) 或更高画质请求时，强行降级限制为 4K (2160p)
-        if (quality.height >= 4320) {
-            quality.height = 2160;
         }
 
         const chunks = [];
@@ -224,6 +230,7 @@
 
         return concatBytes(chunks);
     }
+
     // 3. Configuration and persistent key state.
     function readOptions(defaults = {}) {
         return typeof $argument === "string" && !$argument.includes("{{{")
