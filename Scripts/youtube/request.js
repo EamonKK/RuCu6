@@ -97,25 +97,19 @@
     // 2. Auto HD: edit only SABR quality preferences; preserve every other field.
     function setQuality(bytes, quality) {
         // A fresh manual selection plus sticky resolution prevents ABR downgrades.
-        // Without a matching catalogue, retain the higher-quality preference.
         // Cap at 4K (MAX_HEIGHT): requesting 4320 (8K) makes playback fail on
         // videos without an 8K rendition or on clients that cannot decode 8K.
+        // Without a stored preference, lock to 4K with the same sticky selection
+        // so ABR cannot downgrade it. A stored manual choice keeps its own height.
         const height = Math.min(quality?.height || MAX_HEIGHT, MAX_HEIGHT),
-            values = new Map(
-                quality
-                    ? [
-                          [13, 0],
-                          [14, 2],
-                          [16, height],
-                          [21, height],
-                          [26, 3],
-                          [30, 0],
-                      ]
-                    : [
-                          [16, height],
-                          [26, 1],
-                      ],
-            ),
+            values = new Map([
+                [13, 0],
+                [14, 2],
+                [16, height],
+                [21, height],
+                [26, 3],
+                [30, 0],
+            ]),
             seen = new Set(),
             chunks = [];
         for (const field of wireFields(bytes)) {
