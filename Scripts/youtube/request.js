@@ -96,18 +96,21 @@
     function setQuality(bytes, quality) {
         // A fresh manual selection plus sticky resolution prevents ABR downgrades.
         // Without a matching catalogue, retain the higher-quality preference.
-        const values = new Map(
+        // Cap at 4K (2160): requesting 4320 (8K) makes playback fail on videos
+        // without an 8K rendition or on clients that cannot decode 8K.
+        const height = Math.min(quality?.height || 2160, 2160),
+            values = new Map(
                 quality
                     ? [
                           [13, 0],
                           [14, 2],
-                          [16, quality.height],
-                          [21, quality.height],
+                          [16, height],
+                          [21, height],
                           [26, 3],
                           [30, 0],
                       ]
                     : [
-                          [16, 4320],
+                          [16, height],
                           [26, 1],
                       ],
             ),
@@ -167,65 +170,27 @@
         }
     }
     function forceHighestQuality(bytes, url) {
-    const fields = wireFields(bytes);
-    const quality = selectQuality(fields, url);
-
-    // 8K 安全保护：
-    // 如果当前视频的目标质量是 4320p，
-    // 不修改 SABR 原始请求，让 YouTube 自己协商 8K 播放参数。
-    if (quality?.height >= 4320) {
-        return bytes;
-    }
-
-    // 没有匹配到质量目录时，不再强制写入 4320p。
-    // 这是原代码最容易导致高分辨率播放异常的兜底逻辑。
-    if (!quality) {
-        return bytes;
-    }
-
-    const chunks = [];
-    let found = false;
-
-    for (const field of fields) {
-        if (field.no === 1 && field.wire === 2) {
-            const state = setQuality(field.data, quality);
-
-            chunks.push(
-                varint(10),
-                varint(state.length),
-                state,
-            );
-
-            found = true;
-        } else if (field.no === 17 && field.wire === 2) {
-            // 删除原有 formats，由当前质量目录重新注入允许的 itag。
-            continue;
-        } else {
-            chunks.push(field.raw);
+        const fields = wireFields(bytes),
+            quality = selectQuality(fields, url);
+        const chunks = [];
+        let found = false;
+        for (const field of fields) {
+            if (field.no === 1 && field.wire === 2) {
+                const state = setQuality(field.data, quality);
+                chunks.push(varint(10), varint(state.length), state);
+                found = true;
+            } else if (quality && field.no === 17 && field.wire === 2) {
+                continue;
+            } else chunks.push(field.raw);
         }
-    }
-
-    // 没有原有质量状态时才创建新的状态。
-    if (!found) {
-        const state = setQuality(new Uint8Array(), quality);
-
-        chunks.push(
-            varint(10),
-            varint(state.length),
-            state,
-        );
-    }
-
-    // 仅注入当前质量目录中真实存在的 formats。
-    for (const format of quality.formats) {
-        chunks.push(
-            varint(17 * 8 + 2),
-            varint(format.length),
-            format,
-        );
-    }
-
-    return concatBytes(chunks);
+        if (!found) {
+            const state = setQuality(new Uint8Array(), quality);
+            chunks.push(varint(10), varint(state.length), state);
+        }
+        if (quality)
+            for (const format of quality.formats)
+                chunks.push(varint(17 * 8 + 2), varint(format.length), format);
+        return concatBytes(chunks);
     }
 
     // 3. Configuration and persistent key state.
