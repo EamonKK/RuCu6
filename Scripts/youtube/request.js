@@ -2,6 +2,8 @@
 (() => {
     const CONFIG_KEY = "YouTubeConfig";
     const QUALITY_KEY = "YouTubeQuality";
+    // 8K (4320) requests break playback; cap everything at 4K.
+    const MAX_HEIGHT = 2160;
 
     // 1. Surge dispatch. Request handlers return a result; only main calls $done.
     function main() {
@@ -96,9 +98,9 @@
     function setQuality(bytes, quality) {
         // A fresh manual selection plus sticky resolution prevents ABR downgrades.
         // Without a matching catalogue, retain the higher-quality preference.
-        // Cap at 4K (2160): requesting 4320 (8K) makes playback fail on videos
-        // without an 8K rendition or on clients that cannot decode 8K.
-        const height = Math.min(quality?.height || 2160, 2160),
+        // Cap at 4K (MAX_HEIGHT): requesting 4320 (8K) makes playback fail on
+        // videos without an 8K rendition or on clients that cannot decode 8K.
+        const height = Math.min(quality?.height || MAX_HEIGHT, MAX_HEIGHT),
             values = new Map(
                 quality
                     ? [
@@ -139,6 +141,10 @@
                 !Array.isArray(quality.itags)
             )
                 return;
+            // Drop stored 8K preferences entirely: their 8K format entries would
+            // still be appended to the request and break playback. The 4K
+            // fallback path below is used instead.
+            if (quality.height > MAX_HEIGHT) return;
             const config = fields.find(
                 (field) => field.no === 5 && field.wire === 2,
             );
